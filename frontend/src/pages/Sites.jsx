@@ -1,8 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import SiteManageModal from '../components/SiteManageModal';
+import SiteCreateModal from '../components/SiteCreateModal';
 
 export default function Sites() {
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [sites, setSites] = useState([]);
   const [loading, setLoading] = useState(true);
   const [selectedSite, setSelectedSite] = useState(null);
@@ -42,11 +44,25 @@ export default function Sites() {
   return (
     <div className="space-y-6">
       <div className="flex justify-between items-center">
-        <h1 className="text-2xl font-semibold text-gray-900">Sites</h1>
-        <button className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">
-          + Add New Site
-        </button>
-      </div>
+		 <h1 className="text-2xl font-semibold text-gray-900">Sites</h1>
+		 {/* Update this button */}
+		 <button 
+		   onClick={() => setIsCreateModalOpen(true)} 
+		   className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+		 >
+		   Add Site
+		 </button>
+	   </div>
+
+	   {/* Add this right above the closing </div> of the page */}
+	   <SiteCreateModal 
+		 isOpen={isCreateModalOpen} 
+		 onClose={() => setIsCreateModalOpen(false)} 
+		 onSiteCreated={() => {
+		   setIsCreateModalOpen(false);
+		   fetchSites(); // Refresh the table automatically
+		 }}
+	   />
 
       <div className="bg-white shadow rounded-lg overflow-hidden">
         <div className="p-4 border-b border-gray-200">

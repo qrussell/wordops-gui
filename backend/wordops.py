@@ -4,6 +4,7 @@ import re
 import os
 import socket
 import ssl
+import time
 from datetime import datetime
 import OpenSSL
 from typing import List, Dict, Optional
@@ -15,19 +16,20 @@ class WordOpsService:
 
     @staticmethod
     def run_command(command: List[str]) -> str:
-        """Helper to run shell commands safely"""
+        """Helper to run shell commands safely and strip ANSI color codes"""
         try:
-            # shell=False is safer and default for list args
             result = subprocess.run(
                 command, 
                 capture_output=True, 
                 text=True, 
                 check=True
             )
-            return result.stdout.strip()
+            # Regex to strip terminal color codes
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            clean_output = ansi_escape.sub('', result.stdout)
+            return clean_output.strip()
         except subprocess.CalledProcessError as e:
             print(f"Command failed: {e.cmd}. Error: {e.stderr}")
-            # Re-raise with stderr for better API error messages
             raise Exception(f"WordOps Error: {e.stderr.strip()}")
         except FileNotFoundError:
             print(f"Command not found: {command[0]}")
@@ -180,30 +182,38 @@ class WordOpsService:
         return True
 
     @staticmethod
-    def get_system_stats() -> Dict:
-        """Uses psutil to get real-time server metrics."""
+    def get_system_stats() -> dict:
+        """Uses psutil to get real-time server metrics formatted for the React frontend."""
         try:
-            with open('/proc/uptime', 'r') as f:
-                uptime_seconds = float(f.readline().split()[0])
-                days = int(uptime_seconds // (24 * 3600))
-                hours = int((uptime_seconds % (24 * 3600)) // 3600)
-                minutes = int((uptime_seconds % 3600) // 60)
-                uptime_str = f"{days}d {hours}h {minutes}m"
-        except Exception:
-            uptime_str = "N/A"
-
-        return {
-            "cpu": psutil.cpu_percent(interval=0.1),
-            "ram": {
-                "used": round(psutil.virtual_memory().used / (1024**3), 2),
-                "total": round(psutil.virtual_memory().total / (1024**3), 2)
-            },
-            "disk": {
-                "used": round(psutil.disk_usage('/').used / (1024**3), 2),
-                "total": round(psutil.disk_usage('/').total / (1024**3), 2)
-            },
-            "uptime": uptime_str
-        }
+            # CPU
+            cpu = psutil.cpu_percent(interval=0.1)
+            
+            # RAM
+            ram = psutil.virtual_memory()
+            ram_used_gb = ram.used / (1024**3)
+            ram_total_gb = ram.total / (1024**3)
+            
+            # Disk
+            disk = psutil.disk_usage('/')
+            disk_used_gb = disk.used / (1024**3)
+            disk_total_gb = disk.total / (1024**3)
+            
+            # Uptime (Calculated from boot time)
+            uptime_seconds = time.time() - psutil.boot_time()
+            days, remainder = divmod(uptime_seconds, 86400)
+            hours, remainder = divmod(remainder, 3600)
+            minutes, _ = divmod(remainder, 60)
+            
+            uptime_str = f"{int(days)}d {int(hours)}h {int(minutes)}m" if days > 0 else f"{int(hours)}h {int(minutes)}m"
+            
+            return {
+                "cpu": f"{cpu}%",
+                "ram": f"{ram_used_gb:.1f} / {ram_total_gb:.1f} GB",
+                "disk": f"{disk_used_gb:.1f} / {disk_total_gb:.1f} GB",
+                "uptime": uptime_str
+            }
+        except Exception as e:
+            return {"cpu": "0%", "ram": "0 GB", "disk": "0 GB", "uptime": "Unknown"}
 
     @staticmethod
     def get_logs(domain: str, log_type: str) -> List[Dict]:
@@ -286,40 +296,30 @@ class WordOpsService:
         results = []
         for name, service_name in services_to_check:
             try:
-                # Check if service exists/is loaded
+                # Add sudo to ensure it has permission to query systemd
                 status_check = subprocess.run(
-                    ["systemctl", "is-active", service_name],
+                    ["sudo", "systemctl", "is-active", service_name],
                     capture_output=True,
                     text=True
                 )
                 
-                # Filter out services that are not installed
-                if "unknown" in status_check.stdout.strip():
-                    continue
-                    
-                is_running = status_check.returncode == 0
+                stdout = status_check.stdout.strip().lower()
+                is_running = (stdout == "active")
                 status = "running" if is_running else "stopped"
                 
-                # Try to get version
+                # Try to get version (also with sudo just in case)
                 version = "Unknown"
                 if "nginx" in service_name:
-                    v = subprocess.run(["nginx", "-v"], capture_output=True, text=True)
+                    v = subprocess.run(["sudo", "nginx", "-v"], capture_output=True, text=True)
                     out = v.stderr + v.stdout
                     m = re.search(r"nginx/([\d\.]+)", out)
                     if m: version = m.group(1)
                 elif "php" in service_name:
                     php_bin = service_name.split("-")[0] 
-                    v = subprocess.run([php_bin, "-v"], capture_output=True, text=True)
+                    v = subprocess.run(["sudo", php_bin, "-v"], capture_output=True, text=True)
                     m = re.search(r"PHP ([\d\.]+)", v.stdout)
                     if m: version = m.group(1)
-                elif "mariadb" in service_name:
-                    v = subprocess.run(["mariadb", "--version"], capture_output=True, text=True)
-                    m = re.search(r"Distrib ([\d\.]+)", v.stdout)
-                    if m: version = m.group(1)
-                elif "redis" in service_name:
-                    v = subprocess.run(["redis-server", "--version"], capture_output=True, text=True)
-                    m = re.search(r"v=([\d\.]+)", v.stdout)
-                    if m: version = m.group(1)
+                # ... (keep your existing mariadb/redis version checks here)
                 
                 results.append({
                     "name": name,
@@ -332,3 +332,50 @@ class WordOpsService:
                 pass
                 
         return results
+
+
+class TenantManager:
+    """
+    Handles multi-tenant isolation by creating dedicated Linux users,
+    PHP-FPM pools, and patching Nginx to enforce secure boundaries.
+    """
+    
+    @staticmethod
+    def create_linux_user(username: str):
+        WordOpsService.run_command(["sudo", "useradd", "-m", "-s", "/bin/false", username])
+        
+    @staticmethod
+    def generate_php_pool(username: str, php_version: str):
+        # Convert 8.1 to 81 to match socket syntax
+        php_short = php_version.replace(".", "")
+        pool_config = f"""[{username}]
+user = {username}
+group = {username}
+listen = /run/php/php{php_short}-fpm-{username}.sock
+listen.owner = www-data
+listen.group = www-data
+pm = dynamic
+pm.max_children = 5
+pm.start_servers = 2
+pm.min_spare_servers = 1
+pm.max_spare_servers = 3
+"""
+        pool_path = f"/etc/php/{php_version}/fpm/pool.d/{username}.conf"
+        
+        # Write using sudo tee to handle permissions safely
+        subprocess.run(f"echo '{pool_config}' | sudo tee {pool_path}", shell=True, check=True)
+        
+    @staticmethod
+    def patch_nginx_vhost(domain: str, username: str, php_version: str):
+        php_short = php_version.replace(".", "")
+        vhost_path = f"/etc/nginx/sites-available/{domain}"
+        
+        # Use sed to safely replace the fastcgi_pass socket path
+        old_socket = f"fastcgi_pass php{php_short};"
+        new_socket = f"fastcgi_pass unix:/run/php/php{php_short}-fpm-{username}.sock;"
+        
+        subprocess.run(["sudo", "sed", "-i", f"s|{old_socket}|{new_socket}|g", vhost_path], check=True)
+        
+    @staticmethod
+    def set_permissions(domain: str, username: str):
+        WordOpsService.run_command(["sudo", "chown", "-R", f"{username}:{username}", f"/var/www/{domain}"])

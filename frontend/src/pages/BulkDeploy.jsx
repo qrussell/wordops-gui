@@ -36,6 +36,11 @@ export default function BulkDeploy() {
     fetchVault();
   }, []);
 
+  // Ensure useConsole is imported at the top:
+  // import { useConsole } from '../context/ConsoleContext';
+
+  const { startProcess, log, endProcess } = useConsole(); // Hook into the terminal
+
   const handleDeploy = async () => {
     const domainList = domains.split(/[\n,]+/).map(d => d.trim()).filter(d => d);
     
@@ -45,33 +50,52 @@ export default function BulkDeploy() {
     }
 
     setIsDeploying(true);
-    setStatusMessage(`Preparing to deploy ${domainList.length} sites...`);
+    startProcess('Bulk Deployment');
+    log(`Preparing to deploy ${domainList.length} sites...`, 'system');
+    
+    const token = localStorage.getItem('access_token');
+    let successCount = 0;
 
-    const activeFeatures = [];
-    if (features.ssl) activeFeatures.push('ssl');
-    if (features.cache) activeFeatures.push('cache');
-
-    const payload = {
-      domains: domainList,
-      php_version: phpVersion,
-      features: activeFeatures,
-      plugins: selectedPlugins,
-      admin_user: adminCreds.username,
-      admin_email: adminCreds.email,
-      admin_password: adminCreds.password
-    };
-
-    try {
-      const response = await api.bulk.deploy(payload);
+    // Loop through and deploy one by one to prevent timeouts and show live progress
+    for (let i = 0; i < domainList.length; i++) {
+      const domain = domainList[i];
+      log(`[${i + 1}/${domainList.length}] Building WordPress for ${domain}...`, 'info');
       
-      setStatusMessage(response.data.message || "Deployment queued successfully!");
-      setDomains(''); // Clear input on success
-    } catch (error) {
-      console.error("Deployment failed", error);
-      setStatusMessage("Error: " + (error.response?.data?.detail || error.message));
-    } finally {
-      setIsDeploying(false);
+      try {
+        const payload = {
+          domain,
+          type: 'wp',
+          phpVersion: phpVersion,
+          caching: features.cache ? 'redis' : 'none',
+          ssl: features.ssl,
+          plugins: selectedPlugins
+        };
+
+        const response = await fetch('/api/v1/sites', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.detail || 'Deployment failed');
+        }
+
+        log(`✅ Successfully deployed ${domain}`, 'success');
+        successCount++;
+      } catch (error) {
+        log(`❌ Error deploying ${domain}: ${error.message}`, 'error');
+      }
     }
+
+    log(`Bulk deployment completed. ${successCount}/${domainList.length} sites created.`, 'system');
+    endProcess(successCount === domainList.length ? 'success' : 'error');
+    setIsDeploying(false);
+    setDomains(''); // Clear the box on completion
   };
 
   const togglePlugin = (filename) => {
