@@ -160,7 +160,7 @@ class WordOpsService:
             }
 
     @staticmethod
-    def create_site(domain: str, php: str, features: List[str]):
+    def create_site(domain: str, php: str, features: List[str], admin_user: str = None, admin_email: str = None, admin_pass: str = None):
         """Constructs and runs the `wo site create` command."""
         cmd = ["wo", "site", "create", domain, f"--php={php}"]
         
@@ -168,6 +168,13 @@ class WordOpsService:
             cmd.append("-le")
         if "cache" in features:
             cmd.append("--wpredis")
+        
+        if admin_user:
+            cmd.append(f"--user={admin_user}")
+        if admin_email:
+            cmd.append(f"--email={admin_email}")
+        if admin_pass:
+            cmd.append(f"--pass={admin_pass}")
         
         WordOpsService.run_command(cmd)
         return True

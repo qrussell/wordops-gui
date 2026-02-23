@@ -37,10 +37,10 @@ class TestProvisioning:
         sys_user = "u_example"
 
         # Execute
-        provision_site_task(domain, php_version, features, plugins, sys_user)
+        provision_site_task(domain, php_version, features, plugins, sys_user, "admin", "admin@example.com", "pass")
 
         # 1. Verify WordOps create
-        mock_create_site.assert_called_once_with(domain, php_version, features)
+        mock_create_site.assert_called_once_with(domain, php_version, features, "admin", "admin@example.com", "pass")
 
         # 2. Verify User Creation
         # Should call useradd because 'id' failed
@@ -106,7 +106,7 @@ class TestProvisioning:
         sys_user = "u_site"
 
         # Execute
-        provision_site_task(domain, "8.1", [], plugins, sys_user)
+        provision_site_task(domain, "8.1", [], plugins, sys_user, None, None, None)
 
         # Verify Zip extraction
         vault_path = os.path.join("/opt/wordops-gui/vault", "plugin1.zip")
@@ -132,7 +132,7 @@ class TestProvisioning:
         with patch("builtins.open", mock_open(read_data="config")), \
              patch("os.path.exists", return_value=True):
             
-            provision_site_task("existing.com", "8.1", [], [], "existing_user")
+            provision_site_task("existing.com", "8.1", [], [], "existing_user", None, None, None)
             
             # Verify useradd NOT called
             for call_args in mock_subprocess.call_args_list:

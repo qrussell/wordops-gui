@@ -386,10 +386,10 @@ def list_sites(current_user: User = Depends(get_current_user)):
 def get_site_details(domain: str, current_user: User = Depends(get_current_user)):
     return WordOpsService.get_site_info(domain)
 
-def provision_site_task(domain: str, php_version: str, features: List[str], plugins: List[str], sys_user: str):
+def provision_site_task(domain: str, php_version: str, features: List[str], plugins: List[str], sys_user: str, admin_user: str = None, admin_email: str = None, admin_pass: str = None):
     try:
         # 1. Run WordOps create
-        WordOpsService.create_site(domain, php_version, features)
+        WordOpsService.create_site(domain, php_version, features, admin_user, admin_email, admin_pass)
         
         # 2. Enforce Multi-Tenant Isolation
         # Create system user if not exists
@@ -460,7 +460,7 @@ def create_site(site: SiteCreate, background_tasks: BackgroundTasks, db: Session
         slug = re.sub(r'[^a-z0-9]', '', site.domain.split('.')[0])[:12]
         system_username = f"u_{slug}"
 
-    background_tasks.add_task(provision_site_task, site.domain, site.php_version, site.features, site.plugins, system_username)
+    background_tasks.add_task(provision_site_task, site.domain, site.php_version, site.features, site.plugins, system_username, None, None, None)
     audit_log.info(f"Site creation queued for {site.domain} by {admin.username} (User: {system_username}).")
     return {"message": "Provisioning queued", "status": "pending"}
 
@@ -833,6 +833,9 @@ class BulkDeployRequest(BaseModel):
     features: List[str] = []
     plugins: List[str] = []
     tenant_id: Optional[int] = None
+    admin_user: Optional[str] = None
+    admin_email: Optional[str] = None
+    admin_password: Optional[str] = None
 
 @app.post("/api/v1/bulk/deploy")
 def bulk_deploy_sites(payload: BulkDeployRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
@@ -866,7 +869,10 @@ def bulk_deploy_sites(payload: BulkDeployRequest, background_tasks: BackgroundTa
                 payload.php_version,
                 payload.features,
                 payload.plugins,
-                system_username
+                system_username,
+                payload.admin_user,
+                payload.admin_email,
+                payload.admin_password
             )
         except Exception as e:
             print(f"Error queuing site {domain}: {e}")
@@ -932,7 +938,10 @@ def billing_create_site(
         payload.php_version, 
         payload.features, 
         payload.plugins, 
-        payload.username
+        payload.username,
+        None, # admin_user
+        None, # admin_email
+        None  # admin_pass
     )
     
     audit_log.info(f"Billing: Site creation queued for {payload.domain} (Tenant: {payload.username})")

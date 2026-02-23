@@ -10,6 +10,11 @@ export default function BulkDeploy() {
     ssl: true,
     cache: true,
   });
+  const [adminCreds, setAdminCreds] = useState({
+    username: '',
+    email: '',
+    password: ''
+  });
   const [vaultItems, setVaultItems] = useState([]);
   const [selectedPlugins, setSelectedPlugins] = useState([]);
   const [isDeploying, setIsDeploying] = useState(false);
@@ -50,7 +55,10 @@ export default function BulkDeploy() {
       domains: domainList,
       php_version: phpVersion,
       features: activeFeatures,
-      plugins: selectedPlugins
+      plugins: selectedPlugins,
+      admin_user: adminCreds.username,
+      admin_email: adminCreds.email,
+      admin_password: adminCreds.password
     };
 
     try {
@@ -101,6 +109,40 @@ export default function BulkDeploy() {
             <p className="mt-2 text-xs text-gray-500">
               {domains.split(/[\n,]+/).filter(d => d.trim()).length} domains detected
             </p>
+          </div>
+
+          {/* Admin Credentials */}
+          <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
+            <h3 className="text-lg font-medium text-gray-900 mb-4">WordPress Admin Credentials</h3>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                <input
+                  type="text"
+                  className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                  value={adminCreds.username}
+                  onChange={(e) => setAdminCreds({...adminCreds, username: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Email</label>
+                <input
+                  type="email"
+                  className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                  value={adminCreds.email}
+                  onChange={(e) => setAdminCreds({...adminCreds, email: e.target.value})}
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                <input
+                  type="text"
+                  className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                  value={adminCreds.password}
+                  onChange={(e) => setAdminCreds({...adminCreds, password: e.target.value})}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Stack Config */}

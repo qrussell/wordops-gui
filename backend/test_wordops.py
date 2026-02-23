@@ -85,6 +85,11 @@ class TestWordOpsService:
         WordOpsService.create_site("new.com", "8.2", ["ssl", "cache"])
         mock_run.assert_called_with(["wo", "site", "create", "new.com", "--php=8.2", "-le", "--wpredis"])
 
+    @patch("wordops.WordOpsService.run_command")
+    def test_create_site_with_creds(self, mock_run):
+        WordOpsService.create_site("creds.com", "8.1", [], "admin", "a@b.com", "secret")
+        mock_run.assert_called_with(["wo", "site", "create", "creds.com", "--php=8.1", "--user=admin", "--email=a@b.com", "--pass=secret"])
+
     @patch("psutil.disk_usage")
     @patch("psutil.virtual_memory")
     @patch("psutil.cpu_percent")
