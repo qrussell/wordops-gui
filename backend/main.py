@@ -85,10 +85,14 @@ class Site(Base):
 Base.metadata.create_all(bind=engine)
 
 # --- Pydantic Schemas ---
+
+# Updated to correctly map the incoming JSON from the React frontend
 class SiteCreate(BaseModel):
     domain: str
-    php_version: str = "8.1"
-    features: List[str] = []
+    type: str = 'wp'
+    phpVersion: str = '8.1'
+    caching: str = 'none'
+    ssl: bool = False
     plugins: List[str] = []
     tenant_id: Optional[int] = None
 
@@ -447,6 +451,13 @@ def provision_site_task(domain: str, php_version: str, features: List[str], plug
 @app.post("/api/v1/sites")
 def create_site(site: SiteCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
     
+    # Map frontend payload correctly into WordOps features list
+    features = []
+    if site.ssl:
+        features.append("ssl")
+    if site.caching == "redis":
+        features.append("cache")
+
     # Determine system user for isolation
     system_username = "www-data"
     if site.tenant_id:
@@ -460,7 +471,7 @@ def create_site(site: SiteCreate, background_tasks: BackgroundTasks, db: Session
         slug = re.sub(r'[^a-z0-9]', '', site.domain.split('.')[0])[:12]
         system_username = f"u_{slug}"
 
-    background_tasks.add_task(provision_site_task, site.domain, site.php_version, site.features, site.plugins, system_username, None, None, None)
+    background_tasks.add_task(provision_site_task, site.domain, site.phpVersion, features, site.plugins, system_username, None, None, None)
     audit_log.info(f"Site creation queued for {site.domain} by {admin.username} (User: {system_username}).")
     return {"message": "Provisioning queued", "status": "pending"}
 
