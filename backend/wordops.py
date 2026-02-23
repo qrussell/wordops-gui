@@ -16,24 +16,32 @@ class WordOpsService:
 
     @staticmethod
     def run_command(command: List[str]) -> str:
-        """Helper to run shell commands safely and strip ANSI color codes"""
+        """Helper to run shell commands safely and strip all ANSI codes"""
         try:
+            # 1. Force WordOps to disable color output at the system level
+            env = os.environ.copy()
+            env["TERM"] = "dumb"
+            env["NO_COLOR"] = "1"
+            
             result = subprocess.run(
                 command, 
                 capture_output=True, 
                 text=True, 
-                check=True
+                check=True,
+                env=env
             )
-            # Regex to strip terminal color codes
+            
+            # 2. Heavy-duty Regex to catch any lingering color formatting
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             clean_output = ansi_escape.sub('', result.stdout)
+            
+            # Catch raw bracket artifacts like [34m
+            clean_output = re.sub(r'\[\d+m', '', clean_output) 
+            
             return clean_output.strip()
         except subprocess.CalledProcessError as e:
             print(f"Command failed: {e.cmd}. Error: {e.stderr}")
             raise Exception(f"WordOps Error: {e.stderr.strip()}")
-        except FileNotFoundError:
-            print(f"Command not found: {command[0]}")
-            raise Exception(f"Command not found: {command[0]}")
 
     @staticmethod
     def list_sites() -> List[Dict]:
@@ -296,17 +304,18 @@ class WordOpsService:
         results = []
         for name, service_name in services_to_check:
             try:
-                # Add sudo to ensure it has permission to query systemd
+                # Do not use check=True here so it doesn't crash on offline services
                 status_check = subprocess.run(
-                    ["sudo", "systemctl", "is-active", service_name],
+                    ["systemctl", "is-active", service_name],
                     capture_output=True,
                     text=True
                 )
                 
+                # 'active' means running. 'inactive' or 'failed' means stopped
                 stdout = status_check.stdout.strip().lower()
-                is_running = (stdout == "active")
+                is_running = ("active" in stdout)
                 status = "running" if is_running else "stopped"
-                
+                                
                 # Try to get version (also with sudo just in case)
                 version = "Unknown"
                 if "nginx" in service_name:

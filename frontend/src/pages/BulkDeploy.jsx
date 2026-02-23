@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { CloudArrowUpIcon, CheckCircleIcon } from '@heroicons/react/24/outline';
 import api from '../services/api';
+import { useConsole } from '../context/ConsoleContext';
 
 export default function BulkDeploy() {
   const [domains, setDomains] = useState('');
@@ -39,24 +40,19 @@ export default function BulkDeploy() {
   // Ensure useConsole is imported at the top:
   // import { useConsole } from '../context/ConsoleContext';
 
-  const { startProcess, log, endProcess } = useConsole(); // Hook into the terminal
+  const { startProcess, log, endProcess } = useConsole();
 
   const handleDeploy = async () => {
     const domainList = domains.split(/[\n,]+/).map(d => d.trim()).filter(d => d);
-    
-    if (domainList.length === 0) {
-      alert("Please enter at least one domain.");
-      return;
-    }
+    if (domainList.length === 0) return alert("Please enter at least one domain.");
 
     setIsDeploying(true);
-    startProcess('Bulk Deployment');
+    startProcess('Bulk Deployment'); // This opens the terminal window
     log(`Preparing to deploy ${domainList.length} sites...`, 'system');
     
     const token = localStorage.getItem('access_token');
     let successCount = 0;
 
-    // Loop through and deploy one by one to prevent timeouts and show live progress
     for (let i = 0; i < domainList.length; i++) {
       const domain = domainList[i];
       log(`[${i + 1}/${domainList.length}] Building WordPress for ${domain}...`, 'info');
@@ -71,31 +67,24 @@ export default function BulkDeploy() {
           plugins: selectedPlugins
         };
 
-        const response = await fetch('/api/v1/sites', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
-          body: JSON.stringify(payload)
+        // Use Axios directly to ensure the token is passed correctly
+        await axios.post('/api/v1/sites', payload, {
+          headers: { Authorization: `Bearer ${token}` }
         });
-
-        if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.detail || 'Deployment failed');
-        }
 
         log(`✅ Successfully deployed ${domain}`, 'success');
         successCount++;
       } catch (error) {
-        log(`❌ Error deploying ${domain}: ${error.message}`, 'error');
+        // Correctly extract the Python backend error message
+        const errMsg = error.response?.data?.detail || error.message;
+        log(`❌ Error deploying ${domain}: ${errMsg}`, 'error');
       }
     }
 
     log(`Bulk deployment completed. ${successCount}/${domainList.length} sites created.`, 'system');
     endProcess(successCount === domainList.length ? 'success' : 'error');
     setIsDeploying(false);
-    setDomains(''); // Clear the box on completion
+    setDomains(''); 
   };
 
   const togglePlugin = (filename) => {
