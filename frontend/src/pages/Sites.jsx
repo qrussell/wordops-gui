@@ -9,6 +9,7 @@ export default function Sites() {
   const [selectedSite, setSelectedSite] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+
   const fetchSites = async () => {
     setLoading(true);
     try {
@@ -42,9 +43,10 @@ export default function Sites() {
 
   return (
     <div className="space-y-6">
+      
+      {/* Header and Add Site Button */}
       <div className="flex justify-between items-center">
         <h1 className="text-2xl font-semibold text-gray-900">Sites</h1>
-        {/* 3. Wire the button onClick */}
         <button 
            onClick={() => setIsCreateModalOpen(true)}
            className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
@@ -53,16 +55,7 @@ export default function Sites() {
         </button>
       </div>
 
-	   {/* Add this right above the closing </div> of the page */}
-	   <SiteCreateModal 
-		 isOpen={isCreateModalOpen} 
-		 onClose={() => setIsCreateModalOpen(false)} 
-		 onSiteCreated={() => {
-		   setIsCreateModalOpen(false);
-		   fetchSites(); // Refresh the table automatically
-		 }}
-	   />
-
+      {/* Main Table Card */}
       <div className="bg-white shadow rounded-lg overflow-hidden">
         <div className="p-4 border-b border-gray-200">
           <input
@@ -115,25 +108,24 @@ export default function Sites() {
         </div>
       </div>
 
+      {/* Modals placed outside the normal document flow */}
       {selectedSite && (
         <SiteManageModal domain={selectedSite} onClose={() => setSelectedSite(null)} />
       )}
-		  {/* 4. Place this at the VERY BOTTOM, just inside the last closing </div> */}
-		  {isCreateModalOpen && (
-			<div className="relative z-50">
-			  <SiteCreateModal 
-				isOpen={isCreateModalOpen} 
-				onClose={() => setIsCreateModalOpen(false)} 
-				onSiteCreated={() => {
-				  setIsCreateModalOpen(false);
-				  fetchSites(); 
-				}}
-			  />
-			</div>
-		  )}
-		</div>
-	  );
-	}
+      
+      {isCreateModalOpen && (
+        <div className="relative z-50">
+          <SiteCreateModal 
+            isOpen={isCreateModalOpen} 
+            onClose={() => setIsCreateModalOpen(false)} 
+            onSiteCreated={() => {
+              setIsCreateModalOpen(false);
+              fetchSites(); 
+            }}
+          />
+        </div>
+      )}
+
     </div>
   );
 }
