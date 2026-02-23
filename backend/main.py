@@ -6,7 +6,7 @@ import re
 import requests 
 import asyncio
 import uuid
-from fastapi import UploadFile, File, BackgroundTasks, FastAPI, Depends, HTTPException, status
+from fastapi import UploadFile, File, BackgroundTasks, FastAPI, Depends, HTTPException, status, Header
 from datetime import datetime, timedelta
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,12 +14,13 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, validator, ValidationError
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, JSON, Boolean, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from fastapi import Request
+from sqlalchemy.orm import relationship
 import logging
 import pyotp
 
@@ -58,6 +59,29 @@ class User(Base):
     mfa_secret = Column(String, nullable=True)
     mfa_enabled = Column(Boolean, default=False)
 
+class Tenant(Base):
+    __tablename__ = "tenants"
+
+    id = Column(Integer, primary_key=True, index=True)
+    system_username = Column(String, unique=True, index=True) # e.g., 'cielo_client1'
+    email = Column(String, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String, default="active") # active, suspended
+
+    # Link tenants to their WordPress sites
+    sites = relationship("Site", back_populates="owner")
+
+class Site(Base):
+    __tablename__ = "sites"
+
+    id = Column(Integer, primary_key=True, index=True)
+    domain = Column(String, unique=True, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"))
+    php_version = Column(String, default="8.1")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    owner = relationship("Tenant", back_populates="sites")
+
 Base.metadata.create_all(bind=engine)
 
 # --- Pydantic Schemas ---
@@ -66,6 +90,7 @@ class SiteCreate(BaseModel):
     php_version: str = "8.1"
     features: List[str] = []
     plugins: List[str] = []
+    tenant_id: Optional[int] = None
 
     @validator("domain")
     def validate_domain(cls, v):
@@ -361,28 +386,82 @@ def list_sites(current_user: User = Depends(get_current_user)):
 def get_site_details(domain: str, current_user: User = Depends(get_current_user)):
     return WordOpsService.get_site_info(domain)
 
-@app.post("/api/v1/sites")
-def create_site(site: SiteCreate, background_tasks: BackgroundTasks, admin: User = Depends(is_admin)):
-    
-    def background_provision():
+def provision_site_task(domain: str, php_version: str, features: List[str], plugins: List[str], sys_user: str):
+    try:
+        # 1. Run WordOps create
+        WordOpsService.create_site(domain, php_version, features)
+        
+        # 2. Enforce Multi-Tenant Isolation
+        # Create system user if not exists
         try:
-            WordOpsService.create_site(site.domain, site.php_version, site.features)
-            if site.plugins:
-                site_root = f"/var/www/{site.domain}/htdocs"
-                for item in site.plugins:
-                    vault_path = os.path.join(VAULT_DIR, item)
-                    if os.path.exists(vault_path):
-                        with zipfile.ZipFile(vault_path, 'r') as zip_ref:
-                            is_theme = any(f.endswith('style.css') for f in zip_ref.namelist()[:5])
-                            target = f"{site_root}/wp-content/{'themes' if is_theme else 'plugins'}"
-                            zip_ref.extractall(target)
-                subprocess.run(["chown", "-R", "www-data:www-data", site_root], check=True)
-        except Exception as e:
-            print(f"Error provisioning site {site.domain}: {e}")
-            audit_log.error(f"Provisioning failed for {site.domain}: {e}")
+            subprocess.run(["id", "-u", sys_user], check=True, capture_output=True)
+        except subprocess.CalledProcessError:
+            subprocess.run(["useradd", "-m", "-s", "/bin/false", sys_user], check=True)
 
-    background_tasks.add_task(background_provision)
-    audit_log.info(f"Site creation queued for {site.domain} by {admin.username}.")
+        # Create Custom PHP Pool
+        pool_conf = f"[{sys_user}]\nuser = {sys_user}\ngroup = {sys_user}\nlisten = /run/php/php-fpm-{sys_user}.sock\nlisten.owner = www-data\nlisten.group = www-data\npm = ondemand\npm.max_children = 5\npm.process_idle_timeout = 10s\nchdir = /\n"
+        pool_file = f"/etc/php/{php_version}/fpm/pool.d/{sys_user}.conf"
+        with open(pool_file, "w") as f:
+            f.write(pool_conf)
+        
+        subprocess.run(["systemctl", "restart", f"php{php_version}-fpm"], check=True)
+
+        # Patch Nginx to use the new socket
+        nginx_conf = f"/etc/nginx/sites-available/{domain}"
+        if os.path.exists(nginx_conf):
+            with open(nginx_conf, "r") as f:
+                config = f.read()
+            
+            # Replace fastcgi_pass directive
+            new_sock = f"unix:/run/php/php-fpm-{sys_user}.sock"
+            config = re.sub(r"fastcgi_pass\s+[^;]+;", f"fastcgi_pass {new_sock};", config)
+            
+            with open(nginx_conf, "w") as f:
+                f.write(config)
+            
+            subprocess.run(["nginx", "-t"], check=True)
+            subprocess.run(["systemctl", "reload", "nginx"], check=True)
+
+        # Fix Permissions
+        site_root = f"/var/www/{domain}"
+        subprocess.run(["chown", "-R", f"{sys_user}:{sys_user}", site_root], check=True)
+
+        # Install Plugins/Themes
+        if plugins:
+            htdocs = os.path.join(site_root, "htdocs")
+            for item in plugins:
+                vault_path = os.path.join(VAULT_DIR, item)
+                if os.path.exists(vault_path):
+                    with zipfile.ZipFile(vault_path, 'r') as zip_ref:
+                        is_theme = any(f.endswith('style.css') for f in zip_ref.namelist()[:5])
+                        target = f"{htdocs}/wp-content/{'themes' if is_theme else 'plugins'}"
+                        zip_ref.extractall(target)
+            
+            # Re-apply permissions after extraction
+            subprocess.run(["chown", "-R", f"{sys_user}:{sys_user}", site_root], check=True)
+
+    except Exception as e:
+        print(f"Error provisioning site {domain}: {e}")
+        audit_log.error(f"Provisioning failed for {domain}: {e}")
+
+@app.post("/api/v1/sites")
+def create_site(site: SiteCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
+    
+    # Determine system user for isolation
+    system_username = "www-data"
+    if site.tenant_id:
+        tenant = db.query(Tenant).filter(Tenant.id == site.tenant_id).first()
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        system_username = tenant.system_username
+    else:
+        # Generate a system username based on domain if no tenant specified
+        # e.g. u_examplecom
+        slug = re.sub(r'[^a-z0-9]', '', site.domain.split('.')[0])[:12]
+        system_username = f"u_{slug}"
+
+    background_tasks.add_task(provision_site_task, site.domain, site.php_version, site.features, site.plugins, system_username)
+    audit_log.info(f"Site creation queued for {site.domain} by {admin.username} (User: {system_username}).")
     return {"message": "Provisioning queued", "status": "pending"}
 
 @app.delete("/api/v1/sites/{domain}")
@@ -682,52 +761,244 @@ def update_user(user_id: int, user_update: UserUpdate, db: Session = Depends(get
     audit_log.info(f"User {user_to_update.username} (ID: {user_id}) updated by {admin.username}. New role: {user_update.role}")
     return user_to_update
 
+class TenantUpdate(BaseModel):
+    status: str
+
+@app.get("/api/v1/tenants")
+def list_tenants(db: Session = Depends(get_db), admin: User = Depends(is_admin)):
+    tenants = db.query(Tenant).all()
+    return [{
+        "id": t.id,
+        "username": t.system_username,
+        "email": t.email,
+        "status": t.status,
+        "created_at": t.created_at,
+        "site_count": len(t.sites)
+    } for t in tenants]
+
+@app.put("/api/v1/tenants/{tenant_id}")
+def update_tenant(tenant_id: int, payload: TenantUpdate, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    tenant.status = payload.status
+    db.commit()
+    db.refresh(tenant)
+    audit_log.info(f"Tenant {tenant.system_username} status updated to {payload.status} by {admin.username}")
+    return tenant
+
+@app.delete("/api/v1/tenants/{tenant_id}")
+def delete_tenant(tenant_id: int, background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
+    tenant = db.query(Tenant).filter(Tenant.id == tenant_id).first()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    
+    # Gather info for background deletion
+    username = tenant.system_username
+    
+    def background_delete(user: str, sites_data: List[dict]):
+        # Delete sites
+        for s in sites_data:
+            try:
+                WordOpsService.run_command(["wo", "site", "delete", s['domain'], "--no-prompt"])
+            except Exception as e:
+                print(f"Error deleting site {s['domain']}: {e}")
+        
+        # Kill user processes and delete user
+        try:
+            subprocess.run(["pkill", "-u", user], check=False)
+            subprocess.run(["userdel", "-r", user], check=False)
+        except Exception as e:
+            print(f"Error deleting user {user}: {e}")
+            
+        # Cleanup pools (check common versions)
+        for ver in ["8.0", "8.1", "8.2", "8.3"]:
+            pool = f"/etc/php/{ver}/fpm/pool.d/{user}.conf"
+            if os.path.exists(pool):
+                os.remove(pool)
+                subprocess.run(["systemctl", "restart", f"php{ver}-fpm"], check=False)
+
+    sites_info = [{"domain": s.domain} for s in tenant.sites]
+    background_tasks.add_task(background_delete, username, sites_info)
+    
+    db.delete(tenant)
+    db.commit()
+    audit_log.info(f"Tenant {username} deleted by {admin.username}")
+    return {"status": "deleted"}
+
 class BulkDeployRequest(BaseModel):
     domains: List[str]
     php_version: str = "8.1"
     features: List[str] = []
     plugins: List[str] = []
-
-def create_provisioning_task(site: SiteCreate):
-    def background_provision():
-        try:
-            WordOpsService.create_site(site.domain, site.php_version, site.features)
-            if site.plugins:
-                site_root = f"/var/www/{site.domain}/htdocs"
-                for item in site.plugins:
-                    vault_path = os.path.join(VAULT_DIR, item)
-                    if os.path.exists(vault_path):
-                        with zipfile.ZipFile(vault_path, 'r') as zip_ref:
-                            is_theme = any(f.endswith('style.css') for f in zip_ref.namelist()[:5])
-                            target = f"{site_root}/wp-content/{'themes' if is_theme else 'plugins'}"
-                            zip_ref.extractall(target)
-                subprocess.run(["chown", "-R", "www-data:www-data", site_root], check=True)
-        except Exception as e:
-            print(f"Error provisioning site {site.domain}: {e}")
-            audit_log.error(f"Provisioning failed for {site.domain}: {e}")
-    return background_provision
+    tenant_id: Optional[int] = None
 
 @app.post("/api/v1/bulk/deploy")
-def bulk_deploy_sites(payload: BulkDeployRequest, background_tasks: BackgroundTasks, admin: User = Depends(is_admin)):
+def bulk_deploy_sites(payload: BulkDeployRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db), admin: User = Depends(is_admin)):
     job_id = str(uuid.uuid4())
     
+    # Determine tenant system user if tenant_id is provided
+    tenant_system_user = None
+    if payload.tenant_id:
+        tenant = db.query(Tenant).filter(Tenant.id == payload.tenant_id).first()
+        if not tenant:
+            raise HTTPException(status_code=404, detail="Tenant not found")
+        tenant_system_user = tenant.system_username
+
     for domain in payload.domains:
         try:
-            site = SiteCreate(
-                domain=domain,
-                php_version=payload.php_version,
-                features=payload.features,
-                plugins=payload.plugins
+            # Validate domain format
+            if not re.match(r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$', domain):
+                print(f"Skipping invalid domain {domain}")
+                continue
+
+            # Determine system user for this site
+            if tenant_system_user:
+                system_username = tenant_system_user
+            else:
+                slug = re.sub(r'[^a-z0-9]', '', domain.split('.')[0])[:12]
+                system_username = f"u_{slug}"
+
+            background_tasks.add_task(
+                provision_site_task,
+                domain,
+                payload.php_version,
+                payload.features,
+                payload.plugins,
+                system_username
             )
-            task = create_provisioning_task(site)
-            background_tasks.add_task(task)
-        except ValidationError as e:
-            print(f"Skipping invalid domain {domain}: {e}")
+        except Exception as e:
+            print(f"Error queuing site {domain}: {e}")
             continue
 
     audit_log.info(f"Bulk deployment queued for {len(payload.domains)} sites by {admin.username}. Job ID: {job_id}")
     return {"status": "queued", "job_id": job_id, "message": f"{len(payload.domains)} sites are being provisioned."}
 
+# --- Billing API (FOSSBilling Integration) ---
+
+BILLING_API_KEY = os.getenv("BILLING_API_KEY", "change-this-billing-key")
+
+def verify_billing_key(x_billing_key: str = Header(..., alias="X-Billing-Key")):
+    if x_billing_key != BILLING_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid Billing Key")
+
+class BillingCreateRequest(BaseModel):
+    domain: str
+    username: str
+    email: str
+    php_version: str = "8.1"
+    features: List[str] = []
+    plugins: List[str] = []
+
+class BillingDomainRequest(BaseModel):
+    domain: str
+
+@app.post("/api/v1/billing/create", dependencies=[Depends(verify_billing_key)])
+def billing_create_site(
+    payload: BillingCreateRequest, 
+    background_tasks: BackgroundTasks, 
+    db: Session = Depends(get_db)
+):
+    # Check if tenant exists
+    tenant = db.query(Tenant).filter(Tenant.system_username == payload.username).first()
+    if not tenant:
+        tenant = Tenant(
+            system_username=payload.username,
+            email=payload.email,
+            status="active"
+        )
+        db.add(tenant)
+        db.commit()
+        db.refresh(tenant)
+    
+    # Check if site exists
+    if db.query(Site).filter(Site.domain == payload.domain).first():
+        raise HTTPException(status_code=400, detail="Site already exists")
+
+    # Create Site record
+    new_site = Site(
+        domain=payload.domain,
+        tenant_id=tenant.id,
+        php_version=payload.php_version
+    )
+    db.add(new_site)
+    db.commit()
+
+    # Queue provisioning
+    background_tasks.add_task(
+        provision_site_task, 
+        payload.domain, 
+        payload.php_version, 
+        payload.features, 
+        payload.plugins, 
+        payload.username
+    )
+    
+    audit_log.info(f"Billing: Site creation queued for {payload.domain} (Tenant: {payload.username})")
+    return {"status": "queued", "domain": payload.domain}
+
+@app.post("/api/v1/billing/suspend", dependencies=[Depends(verify_billing_key)])
+def billing_suspend_site(payload: BillingDomainRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    site = db.query(Site).filter(Site.domain == payload.domain).first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    
+    def suspend_task(domain: str):
+        # Unlink from sites-enabled
+        enabled_link = f"/etc/nginx/sites-enabled/{domain}"
+        if os.path.exists(enabled_link):
+            os.remove(enabled_link)
+            subprocess.run(["systemctl", "reload", "nginx"], check=False)
+            audit_log.info(f"Billing: Site {domain} suspended (Nginx disabled)")
+    
+    background_tasks.add_task(suspend_task, payload.domain)
+    return {"status": "suspended", "domain": payload.domain}
+
+@app.post("/api/v1/billing/terminate", dependencies=[Depends(verify_billing_key)])
+def billing_terminate_site(payload: BillingDomainRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    site = db.query(Site).filter(Site.domain == payload.domain).first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    
+    tenant = db.query(Tenant).filter(Tenant.id == site.tenant_id).first()
+    sys_user = tenant.system_username if tenant else None
+
+    def terminate_task(domain: str, user: str, php_ver: str):
+        try:
+            WordOpsService.run_command(["wo", "site", "delete", domain, "--no-prompt"])
+            if user:
+                pool_file = f"/etc/php/{php_ver}/fpm/pool.d/{user}.conf"
+                if os.path.exists(pool_file):
+                    os.remove(pool_file)
+                    subprocess.run(["systemctl", "restart", f"php{php_ver}-fpm"], check=False)
+                subprocess.run(["pkill", "-u", user], check=False)
+                subprocess.run(["userdel", "-r", user], check=False)
+        except Exception as e:
+            audit_log.error(f"Billing: Termination failed for {domain}: {e}")
+
+    background_tasks.add_task(terminate_task, site.domain, sys_user, site.php_version)
+    db.delete(site)
+    db.commit()
+    
+    audit_log.info(f"Billing: Site termination queued for {payload.domain}")
+    return {"status": "terminating", "domain": payload.domain}
+
+@app.post("/api/v1/billing/sso", dependencies=[Depends(verify_billing_key)])
+def billing_sso(payload: BillingDomainRequest, db: Session = Depends(get_db)):
+    site = db.query(Site).filter(Site.domain == payload.domain).first()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    
+    try:
+        site_root = f"/var/www/{payload.domain}/htdocs"
+        cmd_get_admin = ["wp", "user", "list", "--role=administrator", "--field=user_login", "--path=" + site_root, "--allow-root"]
+        admins = subprocess.check_output(cmd_get_admin).decode().splitlines()
+        if not admins: raise HTTPException(status_code=400, detail="No admin user found")
+        cmd_login = ["wp", "login", "create", admins[0], "--porcelain", "--path=" + site_root, "--allow-root"]
+        return {"url": subprocess.check_output(cmd_login).decode().strip()}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 # --- Vault / Library ---
 

@@ -4,6 +4,7 @@ from unittest.mock import patch, MagicMock, mock_open
 import sys
 import os
 import asyncio
+import subprocess
 import pyotp
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -13,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
-    from main import app, get_current_user, User, get_db, Base
+    from main import app, get_current_user, User, get_db, Base, Site, Tenant
 except ImportError:
     # Mock for generation if main.py dependencies aren't available in this context
     from fastapi import FastAPI
@@ -21,6 +22,8 @@ except ImportError:
     get_current_user = lambda: None
     get_db = lambda: None
     Base = object
+    class Site: pass
+    class Tenant: pass
     class User:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
@@ -542,6 +545,128 @@ class TestMFAEndpoints:
         db.close()
 
         app.dependency_overrides = {}
+
+class TestBillingEndpoints:
+    @patch("main.provision_site_task")
+    def test_billing_create_site(self, mock_provision):
+        headers = {"X-Billing-Key": "change-this-billing-key"}
+        payload = {
+            "domain": "billing-site.com",
+            "username": "billing_user",
+            "email": "billing@example.com",
+            "php_version": "8.1"
+        }
+        
+        response = client.post("/api/v1/billing/create", json=payload, headers=headers)
+        
+        assert response.status_code == 200
+        assert response.json()["status"] == "queued"
+        
+        # Verify DB
+        db = TestingSessionLocal()
+        tenant = db.query(Tenant).filter(Tenant.system_username == "billing_user").first()
+        assert tenant is not None
+        site = db.query(Site).filter(Site.domain == "billing-site.com").first()
+        assert site is not None
+        assert site.tenant_id == tenant.id
+        db.close()
+        
+        # Verify task called
+        mock_provision.assert_called_once()
+
+    @patch("os.remove")
+    @patch("os.path.exists")
+    @patch("subprocess.run")
+    def test_billing_suspend_site(self, mock_run, mock_exists, mock_remove):
+        # Setup DB
+        db = TestingSessionLocal()
+        tenant = Tenant(system_username="suspend_user", email="s@e.com")
+        db.add(tenant)
+        db.commit()
+        site = Site(domain="suspend.com", tenant_id=tenant.id)
+        db.add(site)
+        db.commit()
+        db.close()
+
+        mock_exists.return_value = True # Nginx link exists
+
+        headers = {"X-Billing-Key": "change-this-billing-key"}
+        response = client.post("/api/v1/billing/suspend", json={"domain": "suspend.com"}, headers=headers)
+        
+        assert response.status_code == 200
+        mock_remove.assert_called_with("/etc/nginx/sites-enabled/suspend.com")
+        mock_run.assert_called() # reload nginx
+
+    @patch("main.WordOpsService.run_command")
+    @patch("subprocess.run")
+    @patch("os.remove")
+    @patch("os.path.exists")
+    def test_billing_terminate_site(self, mock_exists, mock_remove, mock_subprocess, mock_wo):
+        # Setup DB
+        db = TestingSessionLocal()
+        tenant = Tenant(system_username="term_user", email="t@e.com")
+        db.add(tenant)
+        db.commit()
+        site = Site(domain="term.com", tenant_id=tenant.id)
+        db.add(site)
+        db.commit()
+        db.close()
+
+        mock_exists.return_value = True # Pool file exists
+
+        headers = {"X-Billing-Key": "change-this-billing-key"}
+        response = client.post("/api/v1/billing/terminate", json={"domain": "term.com"}, headers=headers)
+        
+        assert response.status_code == 200
+        
+        # Verify DB deletion
+        db = TestingSessionLocal()
+        assert db.query(Site).filter(Site.domain == "term.com").first() is None
+        db.close()
+
+        # Verify system calls
+        mock_wo.assert_called_with(["wo", "site", "delete", "term.com", "--no-prompt"])
+        mock_remove.assert_called() # pool file
+        # Check for userdel call
+        userdel_called = False
+        for call_args in mock_subprocess.call_args_list:
+            args = call_args[0][0]
+            if "userdel" in args:
+                userdel_called = True
+        assert userdel_called
+
+    @patch("subprocess.check_output")
+    def test_billing_sso(self, mock_check_output):
+        # Setup DB
+        db = TestingSessionLocal()
+        tenant = Tenant(system_username="sso_user", email="sso@e.com")
+        db.add(tenant)
+        db.commit()
+        site = Site(domain="sso.com", tenant_id=tenant.id)
+        db.add(site)
+        db.commit()
+        db.close()
+
+        # Mock WP-CLI output
+        def side_effect(cmd, **kwargs):
+            cmd_str = " ".join(cmd)
+            if "user list" in cmd_str:
+                return b"admin_user"
+            if "login create" in cmd_str:
+                return b"http://sso.com/login?token=xyz"
+            return b""
+        
+        mock_check_output.side_effect = side_effect
+
+        headers = {"X-Billing-Key": "change-this-billing-key"}
+        response = client.post("/api/v1/billing/sso", json={"domain": "sso.com"}, headers=headers)
+        
+        assert response.status_code == 200
+        assert response.json()["url"] == "http://sso.com/login?token=xyz"
+
+    def test_billing_auth_fail(self):
+        response = client.post("/api/v1/billing/create", json={}, headers={"X-Billing-Key": "wrong"})
+        assert response.status_code == 403
 
 if __name__ == "__main__":
     # Allow running directly
