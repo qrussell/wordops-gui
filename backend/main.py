@@ -1132,14 +1132,30 @@ Base.metadata.create_all(bind=engine)
 
 @app.on_event("startup")
 def startup_db():
+    # 1. FORCE table creation first
+    try:
+        Base.metadata.create_all(bind=engine)
+        print("Database tables verified/created.")
+    except Exception as e:
+        print(f"Failed to create tables: {e}")
+        return
+
+    # 2. Proceed with querying the admin user
     db = SessionLocal()
     try:
-        # Now it's safe to query because the tables definitely exist
-        if not db.query(User).filter(User.username == "admin").first():
-            hashed_pw = pwd_context.hash("admin") # Change this after first login!
-            default_admin = User(username="admin", hashed_password=hashed_pw, role="administrator")
+        # Check if admin exists
+        admin_user = db.query(User).filter(User.username == "admin").first()
+        if not admin_user:
+            print("Creating default admin user...")
+            hashed_pw = pwd_context.hash("admin") # Change this after login!
+            default_admin = User(
+                username="admin", 
+                hashed_password=hashed_pw, 
+                role="administrator"
+            )
             db.add(default_admin)
             db.commit()
+            print("Default admin created successfully.")
     except Exception as e:
         print(f"Database startup error: {e}")
     finally:
