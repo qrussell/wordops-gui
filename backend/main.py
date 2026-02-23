@@ -1127,11 +1127,20 @@ async def serve_react_app(full_path: str):
     index_path = os.path.join(FRONTEND_DIR, "index.html")
     return FileResponse(index_path) if os.path.exists(index_path) else {"error": "Frontend not found"}
 
+# Make sure your database engine is creating the tables first
+Base.metadata.create_all(bind=engine)
+
 @app.on_event("startup")
 def startup_db():
     db = SessionLocal()
-    if not db.query(User).filter(User.username == "admin").first():
-        initial_password = os.getenv("INITIAL_ADMIN_PASSWORD", "password")
-        db.add(User(username="admin", hashed_password=pwd_context.hash(initial_password), role="administrator"))
-        db.commit()
-    db.close()
+    try:
+        # Now it's safe to query because the tables definitely exist
+        if not db.query(User).filter(User.username == "admin").first():
+            hashed_pw = pwd_context.hash("admin") # Change this after first login!
+            default_admin = User(username="admin", hashed_password=hashed_pw, role="administrator")
+            db.add(default_admin)
+            db.commit()
+    except Exception as e:
+        print(f"Database startup error: {e}")
+    finally:
+        db.close()
