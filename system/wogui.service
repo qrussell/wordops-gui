@@ -1,0 +1,16 @@
+[Unit]
+Description=WordOps GUI Backend API
+After=network.target
+
+[Service]
+User=root
+Group=root
+WorkingDirectory=/opt/wordops-gui/backend
+Environment="PATH=/opt/wordops-gui/backend/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+# SECRET_KEY should be a long random string
+Environment="SECRET_KEY=change_this_to_a_random_secure_string"
+# Change --workers 2 to --workers 1
+ExecStart=/opt/wordops-gui/backend/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000 --workers 1
+
+[Install]
+WantedBy=multi-user.target
