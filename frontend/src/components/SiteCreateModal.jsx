@@ -1,25 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  X, 
-  Globe, 
-  Server, 
-  Zap, 
-  Shield, 
-  Loader, 
-  Box, 
-  CheckSquare, 
-  Square 
-} from 'lucide-react';
-// Import console hook
-import { useConsole } from '../context/ConsoleContext';
+import { X, Globe, Zap, Shield, Loader, Box, CheckSquare, Square } from 'lucide-react';
 
 const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
   const [step, setStep] = useState(1);
   const [loading, setLoading] = useState(false);
   const [vaultItems, setVaultItems] = useState([]);
-  
-  // Access Console
-  const { startProcess, log, endProcess } = useConsole();
+  const [statusMessage, setStatusMessage] = useState('');
 
   const [formData, setFormData] = useState({
     domain: '',
@@ -38,6 +24,10 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
       .then(res => res.json())
       .then(data => setVaultItems(data.items || []))
       .catch(err => console.error("Failed to load vault", err));
+      
+      // Reset state when opened
+      setStep(1);
+      setStatusMessage('');
     }
   }, [isOpen]);
 
@@ -55,14 +45,9 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
 
   const handleSubmit = async () => {
     setLoading(true);
-    
-    // 1. OPEN CONSOLE
-    startProcess(`Creating Site: ${formData.domain}`);
-    log('Validating configuration...', 'cmd');
+    setStatusMessage('Sending request to server...');
 
     try {
-      log(`Sending request to backend... (PHP ${formData.phpVersion}, ${formData.caching})`, 'info');
-      
       const res = await fetch('/api/v1/sites', {
         method: 'POST',
         headers: {
@@ -73,37 +58,33 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
       });
       
       if (res.ok) {
-        log('Server accepted request. Background provisioning started.', 'success');
-        log('WordOps is now creating the site. This may take 1-2 minutes.', 'info');
-        if (formData.plugins.length > 0) {
-            log(`Queued installation for ${formData.plugins.length} plugins.`, 'info');
-        }
-        
-        onSiteCreated();
-        onClose();
-        setStep(1);
-        setFormData({ domain: '', type: 'wp', phpVersion: '8.1', caching: 'redis', ssl: true, plugins: [] });
+        setStatusMessage('Site creation started in background!');
+        setTimeout(() => {
+            onSiteCreated();
+            onClose();
+            setFormData({ domain: '', type: 'wp', phpVersion: '8.1', caching: 'redis', ssl: true, plugins: [] });
+            setLoading(false);
+        }, 1500);
       } else {
         const err = await res.json();
-        log(`Failed: ${err.detail || 'Unknown error'}`, 'error');
-        alert("Failed to create site");
+        setStatusMessage(`Failed: ${err.detail || 'Unknown error'}`);
+        setLoading(false);
       }
     } catch (err) {
-      log(`Network Error: ${err.message}`, 'error');
       console.error(err);
-      alert("Error creating site");
-    } finally {
+      setStatusMessage(`Network Error: ${err.message}`);
       setLoading(false);
-      // We don't call endProcess() immediately so the user can see the logs
     }
   };
 
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+      {/* Overlay */}
       <div className="absolute inset-0 bg-gray-900/75" onClick={onClose} />
       
+      {/* Modal Container */}
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg overflow-hidden flex flex-col max-h-[90vh]">
         
         <div className="bg-gray-50 px-6 py-4 border-b border-gray-100 flex justify-between items-center shrink-0">
@@ -112,6 +93,13 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
         </div>
 
         <div className="p-6 space-y-6 overflow-y-auto">
+          {/* Status Message */}
+          {statusMessage && (
+            <div className={`p-3 rounded-md text-sm ${statusMessage.includes('Failed') || statusMessage.includes('Error') ? 'bg-red-50 text-red-700' : 'bg-blue-50 text-blue-700'}`}>
+                {statusMessage}
+            </div>
+          )}
+
           {step === 1 && (
             <div className="space-y-4 animate-in slide-in-from-left-4">
               <div>
@@ -125,6 +113,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                     className="pl-10 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 border"
                     value={formData.domain}
                     onChange={e => setFormData({...formData, domain: e.target.value})}
+                    disabled={loading}
                   />
                 </div>
               </div>
@@ -136,6 +125,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                     className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 border"
                     value={formData.type}
                     onChange={e => setFormData({...formData, type: e.target.value})}
+                    disabled={loading}
                   >
                     <option value="wp">WordPress</option>
                     <option value="php">PHP / Laravel</option>
@@ -148,6 +138,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                     className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 py-2 border"
                     value={formData.phpVersion}
                     onChange={e => setFormData({...formData, phpVersion: e.target.value})}
+                    disabled={loading}
                   >
                     <option value="8.3">PHP 8.3</option>
                     <option value="8.2">PHP 8.2</option>
@@ -166,6 +157,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                        className="text-sm border-blue-200 rounded bg-white py-1 px-2 text-blue-800"
                        value={formData.caching}
                        onChange={e => setFormData({...formData, caching: e.target.value})}
+                       disabled={loading}
                     >
                        <option value="redis">Redis</option>
                        <option value="fastcgi">FastCGI</option>
@@ -182,6 +174,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                       checked={formData.ssl}
                       onChange={e => setFormData({...formData, ssl: e.target.checked})}
                       className="h-4 w-4 text-blue-600 rounded"
+                      disabled={loading}
                     />
                  </div>
               </div>
@@ -208,12 +201,12 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
                       {vaultItems.map(item => (
                          <div 
                             key={item.name}
-                            onClick={() => togglePlugin(item.name)}
+                            onClick={() => !loading && togglePlugin(item.name)}
                             className={`flex items-center p-3 border rounded-lg cursor-pointer transition-colors ${
                                formData.plugins.includes(item.name) 
                                ? 'bg-blue-50 border-blue-500' 
                                : 'hover:bg-gray-50 border-gray-200'
-                            }`}
+                            } ${loading ? 'opacity-50 cursor-not-allowed' : ''}`}
                          >
                             {formData.plugins.includes(item.name) 
                                ? <CheckSquare size={18} className="text-blue-600 mr-3" />
@@ -230,7 +223,7 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
 
         <div className="bg-gray-50 px-6 py-4 flex justify-between shrink-0">
            {step === 2 ? (
-              <button onClick={() => setStep(1)} className="text-gray-600 hover:text-gray-900 text-sm font-medium">
+              <button onClick={() => setStep(1)} disabled={loading} className="text-gray-600 hover:text-gray-900 text-sm font-medium disabled:opacity-50">
                  &larr; Back
               </button>
            ) : (
@@ -240,10 +233,10 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
            <div className="flex space-x-3">
               {step === 1 ? (
                  <>
-                    <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium">Cancel</button>
+                    <button onClick={onClose} disabled={loading} className="px-4 py-2 text-gray-600 hover:text-gray-800 font-medium disabled:opacity-50">Cancel</button>
                     <button 
                        onClick={() => setStep(2)}
-                       disabled={!formData.domain}
+                       disabled={!formData.domain || loading}
                        className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 font-medium disabled:opacity-50"
                     >
                        Next: Plugins
@@ -261,7 +254,6 @@ const SiteCreateModal = ({ isOpen, onClose, onSiteCreated }) => {
               )}
            </div>
         </div>
-
       </div>
     </div>
   );
